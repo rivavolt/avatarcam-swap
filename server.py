@@ -9,7 +9,7 @@ client -> server
 
 server -> client
   R  json {gpu, load_s, prepare_s, since_boot_s, workers}
-  F  seq:u32be | server_us:u32be | jpeg frame, the same size as the camera frame
+  F  seq:u32be | flags_us:u32be | jpeg frame, the same size as the camera frame; flags_us is the server's time on the frame in microseconds, with the top bit set when no face was found in it
   E  error text, then the server closes the connection
 
 Frames run on WORKERS threads at once, which is what holds 30 fps when one frame takes longer than a frame period, and leave in the order they arrived. At most MAX_QUEUE frames wait for a worker; beyond that the oldest waiting frame is dropped, so latency stays bounded rather than growing. A frame where no face is found would show the real face, so the last swapped frame is held for HOLD frames and after that the frame goes out pixelated.
@@ -46,6 +46,8 @@ FF_ARGS = [
     "--face-swapper-model", "hyperswap_1a_256",
     "--face-mask-types", "box", "occlusion",
     "--face-selector-mode", "one",
+    # a webcam in a dim room scores faces lower than FaceFusion's 0.5 default expects, and a missed face is a frozen or pixelated frame
+    "--face-detector-score", "0.35",
     "--execution-providers", "cuda",
     "--video-memory-strategy", "tolerant",
     "--log-level", "info",
@@ -287,8 +289,9 @@ def serve_client(conn, engine_box, engine_ready, token):
                 t0 = time.perf_counter()
                 bgr = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
                 out = engine.swap(bgr) if bgr is not None else None
+                found = out is not None
                 with cond:
-                    if out is not None:
+                    if found:
                         held["frame"], held["misses"] = out, 0
                     else:
                         counters["missed"] += 1
@@ -300,8 +303,8 @@ def serve_client(conn, engine_box, engine_ready, token):
                 msg = None
                 if out is not None:
                     data = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, JPEG_Q])[1].tobytes()
-                    us = int((time.perf_counter() - t0) * 1e6)
-                    msg = pack("F", struct.pack(">II", seq, us) + data)
+                    us = min(int((time.perf_counter() - t0) * 1e6), 0x7FFFFFFF)
+                    msg = pack("F", struct.pack(">II", seq, us | (0 if found else 0x80000000)) + data)
             except Exception as e:
                 traceback.print_exc()
                 fail(f"frame failed: {e}")
