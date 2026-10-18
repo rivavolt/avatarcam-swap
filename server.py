@@ -20,6 +20,7 @@ The server writes a heartbeat file on every received frame; bootstrap.sh's watch
 """
 
 import collections
+import concurrent.futures
 import json
 import os
 import socket
@@ -157,18 +158,24 @@ class Engine:
         self.lock = threading.Lock()
         self.faces = 0
         self.set_face_path(WARM_FACE)
-        # every model's session is created on its first use; doing that from several threads at once creates some twice, so the first frames go one at a time, then a parallel round lets cuDNN settle under concurrency
+        # The threads that swap a client's frames. They live as long as the engine because onnxruntime's CUDA provider sets up per-thread state (stream, cuBLAS and cuDNN handles) on a thread's first run of each model, which costs seconds, so these threads are the ones warmed here.
+        self.pool = concurrent.futures.ThreadPoolExecutor(WORKERS, thread_name_prefix="swap")
+        # every model's session is created on its first use; doing that from several threads at once creates some twice, so the first frames go one at a time
         warm = np.full((720, 1280, 3), 200, np.uint8)
         face = cv2.imread(WARM_FACE)
         face = cv2.resize(face, (480, 480))
         warm[120:600, 400:880] = face
         for _ in range(3):
             self.process_stream_frame(self.source_frames, warm)
-        threads = [threading.Thread(target=self.process_stream_frame, args=(self.source_frames, warm)) for _ in range(WORKERS * 2)]
-        for th in threads:
-            th.start()
-        for th in threads:
-            th.join()
+        # a barrier holds each task until all WORKERS have one, so every pool thread runs the models at least once
+        for _ in range(2):
+            barrier = threading.Barrier(WORKERS)
+
+            def run():
+                barrier.wait(timeout=120)
+                self.process_stream_frame(self.source_frames, warm)
+
+            list(self.pool.map(lambda _: run(), range(WORKERS)))
         self.load_s = time.time() - t0
 
     def set_face_path(self, path):
@@ -347,9 +354,7 @@ def serve_client(conn, engine_box, engine_ready, token):
         }
         log("ready", info)
         if not workers:
-            workers.extend(threading.Thread(target=worker, args=(engine,), daemon=True) for _ in range(WORKERS))
-            for th in workers:
-                th.start()
+            workers.extend(engine.pool.submit(worker, engine) for _ in range(WORKERS))
         try:
             send(pack("R", json.dumps(info).encode()))
         except OSError:
@@ -383,8 +388,8 @@ def serve_client(conn, engine_box, engine_ready, token):
         stop.set()
         with cond:
             cond.notify_all()
-        for th in [sender_thread, *workers]:
-            th.join(timeout=3)
+        sender_thread.join(timeout=3)
+        concurrent.futures.wait(workers, timeout=3)
         log(f"client done: frames={counters['n']} dropped={counters['dropped']} no_face={counters['missed']}")
 
 
