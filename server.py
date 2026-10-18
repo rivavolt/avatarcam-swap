@@ -113,11 +113,13 @@ def facefusion(face_path):
         so.add_session_config_entry("session.intra_op.allow_spinning", "0")
         return session_cls(path, sess_options=so, providers=providers, **kw)
 
-    from facefusion import inference_manager, logger, state_manager
+    from facefusion import inference_manager, logger, program, state_manager
     from facefusion.args import apply_args
     from facefusion.program import create_program
 
     inference_manager.InferenceSession = session
+    # the parser lists ffmpeg's encoders for the video output options, which the stream path never uses, and the image has no ffmpeg
+    program.get_available_encoder_set = lambda: {"audio": [], "video": []}
     sys.argv = ["facefusion.py", "headless-run", "--source-paths", face_path, "--target-path", face_path, "--output-path", "/tmp/avatarcam-unused.jpg", *FF_ARGS]
     apply_args(vars(create_program().parse_args()), state_manager.init_item)
     logger.init("info")
