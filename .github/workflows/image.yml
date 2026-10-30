@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+
+# Pushes the image, so a running run always finishes and GitHub keeps only the newest pending one per group: a burst of pushes yields at most one more run, of the latest commit, never parallel or out-of-order ones.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
